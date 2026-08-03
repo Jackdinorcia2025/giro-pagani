@@ -146,7 +146,7 @@ label.small{font-size:11px; color:var(--text-muted); text-transform:uppercase; l
 .spinner{display:inline-block; width:14px; height:14px; border:2px solid var(--teal-dim); border-top-color:var(--teal); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:-2px; margin-right:6px;}
 @keyframes spin{to{transform:rotate(360deg);}}
 
-.toast{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(100px + var(--safe-bottom)); background:var(--surface-2); border:1px solid var(--teal); color:var(--text); padding:10px 16px; border-radius:10px; font-size:13px; z-index:60; opacity:0; transition:opacity 0.25s; pointer-events:none;}
+.toast{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(100px + var(--safe-bottom)); background:var(--surface-2); border:1px solid var(--teal); color:var(--text); padding:10px 16px; border-radius:10px; font-size:13px; z-index:60; opacity:0; transition:opacity 0.25s; pointer-events:none; max-width:calc(100vw - 40px); width:400px; text-align:center; line-height:1.4;}
 .toast.show{opacity:1;}
 </style>
 </head>
@@ -697,6 +697,8 @@ function orOptImprove(path, startLat, startLon, endLat, endLon){
 }
 
 function optimize(startLat, startLon){
+  const beforeOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+
   const pending = currentStops.filter(s=>!s.done && s.kind!=='home');
   const doneStops = currentStops.filter(s=>s.done && s.kind!=='home');
   const withCoords = pending.filter(s=>s.lat && s.lon);
@@ -718,17 +720,34 @@ function optimize(startLat, startLon){
   currentDayAutoOptimized = true;
   render();
   persistCurrent();
-  showToast(startLat!=null ? 'Giro ottimizzato dalla tua posizione attuale' : 'Giro ottimizzato (posizione GPS non disponibile: attiva la localizzazione per un risultato migliore)');
+
+  const afterOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+  const changed = beforeOrder !== afterOrder;
+  if (startLat!=null){
+    showToast(changed ? 'Giro ottimizzato dalla tua posizione attuale' : "Il giro era già nell'ordine più efficiente");
+  } else {
+    showToast(changed ? "Giro riordinato, ma senza GPS: attivalo per un risultato basato sulla tua posizione reale" : "Nessuna modifica: attiva la localizzazione per un giro ottimizzato dalla tua posizione");
+  }
 }
 function runOptimize(){
   if (navigator.geolocation){
     showToast('Rilevamento posizione GPS...');
     navigator.geolocation.getCurrentPosition(
       pos=>optimize(pos.coords.latitude, pos.coords.longitude),
-      ()=>optimize(null,null),
+      (err)=>{
+        let msg = 'Posizione non disponibile';
+        if (err){
+          if (err.code===1) msg = 'Permesso di localizzazione negato: attivalo nelle impostazioni del sito in Chrome (tocca il lucchetto nella barra indirizzi)';
+          else if (err.code===2) msg = 'GPS irraggiungibile al momento (segnale assente)';
+          else if (err.code===3) msg = 'Richiesta posizione scaduta (timeout)';
+        }
+        showToast(msg);
+        optimize(null,null);
+      },
       {timeout:8000, enableHighAccuracy:true}
     );
   } else {
+    showToast('Il browser non supporta la geolocalizzazione');
     optimize(null,null);
   }
 }
@@ -792,7 +811,7 @@ function showToast(msg){
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(()=>t.classList.remove('show'), 2200);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), 3800);
 }
 
 // ---------- date navigation ----------
