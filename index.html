@@ -648,6 +648,38 @@ function bestFreeStartOrder(stops, endLat, endLon){
   return bestOrder;
 }
 
+// Costruisce un ordine iniziale che considera DAVVERO entrambi gli estremi:
+// posizione GPS corrente come partenza e Casa come punto di ritorno.
+// Prova ogni tappa come prima visita; così anche con sole 2 tappe vengono
+// confrontati entrambi gli ordini possibili, cosa che il solo nearest-neighbor
+// non faceva. Il risultato viene poi rifinito con 2-opt e Or-opt.
+function bestFixedEndpointsOrder(stops, startLat, startLon, endLat, endLon){
+  if (stops.length === 0) return [];
+  if (stops.length === 1) return [...stops];
+
+  let bestOrder = null;
+  let bestLen = Infinity;
+
+  for (let k=0; k<stops.length; k++){
+    const first = stops[k];
+    const rest = stops.slice(0,k).concat(stops.slice(k+1));
+    let candidate = [first, ...nearestNeighborOrder(rest, first.lat, first.lon)];
+
+    // Il ritorno può rendere vantaggioso percorrere la stessa sequenza al contrario.
+    const reversed = [...candidate].reverse();
+    const lenForward = routeLength(candidate, startLat, startLon, endLat, endLon);
+    const lenReverse = routeLength(reversed, startLat, startLon, endLat, endLon);
+    if (lenReverse < lenForward) candidate = reversed;
+
+    const len = routeLength(candidate, startLat, startLon, endLat, endLon);
+    if (len < bestLen){
+      bestLen = len;
+      bestOrder = candidate;
+    }
+  }
+  return bestOrder;
+}
+
 function routeLength(path, startLat, startLon, endLat, endLon){
   let total = 0;
   let curLat = startLat, curLon = startLon;
@@ -662,7 +694,7 @@ function routeLength(path, startLat, startLon, endLat, endLon){
 // 2-opt local search: tries reversing segments to shrink total distance,
 // keeping the current GPS position and the home address as fixed start/end.
 function twoOptImprove(path, startLat, startLon, endLat, endLon){
-  if (path.length < 3) return path;
+  if (path.length < 2) return path;
   let best = [...path];
   let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
   let improved = true;
@@ -734,9 +766,9 @@ function optimize(startLat, startLon){
   const endLon = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lon : null);
 
   let ordered = (startLat!=null && startLon!=null)
-    ? nearestNeighborOrder(withCoords, startLat, startLon)
+    ? bestFixedEndpointsOrder(withCoords, startLat, startLon, endLat, endLon)
     : bestFreeStartOrder(withCoords, endLat, endLon);
-  if (ordered.length >= 3 && ordered.length <= 30){
+  if (ordered.length >= 2 && ordered.length <= 30){
     // due passate alternate: elimina prima gli incroci, poi le tappe fuori
     // percorso, poi rifinisce ancora — converge verso un ottimo locale solido
     ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
@@ -752,7 +784,7 @@ function optimize(startLat, startLon){
   const afterOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
   const changed = beforeOrder !== afterOrder;
   if (startLat!=null){
-    showToast(changed ? 'Giro ottimizzato dalla tua posizione attuale' : "Il giro era già nell'ordine più efficiente");
+    showToast(changed ? 'Giro ottimizzato dalla posizione attuale fino al punto di ritorno' : "Il giro era già nell'ordine più efficiente tra partenza e ritorno");
   } else {
     showToast(changed ? "Giro riordinato, ma senza GPS: attivalo per un risultato basato sulla tua posizione reale" : "Nessuna modifica: attiva la localizzazione per un giro ottimizzato dalla tua posizione");
   }
