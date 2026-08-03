@@ -601,7 +601,7 @@ function navigateAll(){
   window.open(url, '_blank');
 }
 
-// ---------- route optimization (nearest neighbor + 2-opt) ----------
+// ---------- route optimization with real driving distances ----------
 function haversine(lat1,lon1,lat2,lon2){
   const R=6371, toRad=x=>x*Math.PI/180;
   const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
@@ -609,106 +609,114 @@ function haversine(lat1,lon1,lat2,lon2){
   return R*2*Math.asin(Math.sqrt(a));
 }
 
-function nearestNeighborOrder(stops, startLat, startLon){
-  const remaining = [...stops];
-  const ordered = [];
-  let curLat = startLat, curLon = startLon;
-  while(remaining.length){
-    let bestIdx = 0, bestDist = Infinity;
-    if (curLat==null){
-      bestIdx = 0;
-    } else {
-      remaining.forEach((s,idx)=>{
-        const d = haversine(curLat,curLon,s.lat,s.lon);
-        if(d<bestDist){bestDist=d; bestIdx=idx;}
-      });
-    }
-    const next = remaining.splice(bestIdx,1)[0];
-    ordered.push(next);
-    curLat = next.lat; curLon = next.lon;
-  }
-  return ordered;
+function buildAirMatrix(points){
+  return points.map(a=>points.map(b=>a===b ? 0 : haversine(a.lat,a.lon,b.lat,b.lon)*1000));
 }
 
-// Quando non c'è una posizione GPS reale da cui partire, non ha senso
-// ancorarsi arbitrariamente al primo punto della lista: proviamo ogni tappa
-// come possibile partenza e teniamo quella che rende il percorso complessivo
-// più corto (compreso l'arrivo a Casa, se impostata).
-function bestFreeStartOrder(stops, endLat, endLon){
-  if (stops.length === 0) return [];
-  if (stops.length === 1) return [...stops];
-  let bestOrder = null, bestLen = Infinity;
-  for (let k=0; k<stops.length; k++){
-    const start = stops[k];
-    const rest = stops.slice(0,k).concat(stops.slice(k+1));
-    const order = [start, ...nearestNeighborOrder(rest, start.lat, start.lon)];
-    const len = routeLength(order, null, null, endLat, endLon);
-    if (len < bestLen){ bestLen = len; bestOrder = order; }
+// OSRM restituisce una matrice di distanze sulla rete stradale, non in linea d'aria.
+// Se il servizio non è raggiungibile l'app continua a funzionare usando Haversine.
+async function getDrivingMatrix(points){
+  if (points.length < 2) return buildAirMatrix(points);
+  const coords = points.map(p=>`${Number(p.lon).toFixed(6)},${Number(p.lat).toFixed(6)}`).join(';');
+  const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), 12000);
+  try{
+    const res = await fetch(url, {signal:controller.signal, cache:'no-store'});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.code !== 'Ok' || !Array.isArray(data.distances)) throw new Error('Matrice stradale non valida');
+    const fallback = buildAirMatrix(points);
+    return data.distances.map((row,i)=>row.map((v,j)=>Number.isFinite(v) ? v : fallback[i][j]));
+  } finally {
+    clearTimeout(timer);
   }
-  return bestOrder;
 }
 
-// Costruisce un ordine iniziale che considera DAVVERO entrambi gli estremi:
-// posizione GPS corrente come partenza e Casa come punto di ritorno.
-// Prova ogni tappa come prima visita; così anche con sole 2 tappe vengono
-// confrontati entrambi gli ordini possibili, cosa che il solo nearest-neighbor
-// non faceva. Il risultato viene poi rifinito con 2-opt e Or-opt.
-function bestFixedEndpointsOrder(stops, startLat, startLon, endLat, endLon){
-  if (stops.length === 0) return [];
-  if (stops.length === 1) return [...stops];
-
-  let bestOrder = null;
-  let bestLen = Infinity;
-
-  for (let k=0; k<stops.length; k++){
-    const first = stops[k];
-    const rest = stops.slice(0,k).concat(stops.slice(k+1));
-    let candidate = [first, ...nearestNeighborOrder(rest, first.lat, first.lon)];
-
-    // Il ritorno può rendere vantaggioso percorrere la stessa sequenza al contrario.
-    const reversed = [...candidate].reverse();
-    const lenForward = routeLength(candidate, startLat, startLon, endLat, endLon);
-    const lenReverse = routeLength(reversed, startLat, startLon, endLat, endLon);
-    if (lenReverse < lenForward) candidate = reversed;
-
-    const len = routeLength(candidate, startLat, startLon, endLat, endLon);
-    if (len < bestLen){
-      bestLen = len;
-      bestOrder = candidate;
-    }
-  }
-  return bestOrder;
-}
-
-function routeLength(path, startLat, startLon, endLat, endLon){
+function matrixRouteLength(order, matrix, stopOffset, startIndex, endIndex){
+  if (!order.length) return (startIndex!=null && endIndex!=null) ? matrix[startIndex][endIndex] : 0;
   let total = 0;
-  let curLat = startLat, curLon = startLon;
-  for (const p of path){
-    if (curLat!=null) total += haversine(curLat,curLon,p.lat,p.lon);
-    curLat = p.lat; curLon = p.lon;
-  }
-  if (endLat!=null && curLat!=null) total += haversine(curLat,curLon,endLat,endLon);
+  if (startIndex!=null) total += matrix[startIndex][stopOffset + order[0]];
+  for(let i=0;i<order.length-1;i++) total += matrix[stopOffset+order[i]][stopOffset+order[i+1]];
+  if (endIndex!=null) total += matrix[stopOffset+order[order.length-1]][endIndex];
   return total;
 }
 
-// 2-opt local search: tries reversing segments to shrink total distance,
-// keeping the current GPS position and the home address as fixed start/end.
-function twoOptImprove(path, startLat, startLon, endLat, endLon){
-  if (path.length < 2) return path;
-  let best = [...path];
-  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 300){
-    improved = false;
-    guard++;
-    for (let i=0; i<best.length-1; i++){
-      for (let j=i+1; j<best.length; j++){
-        const candidate = best.slice(0,i).concat(best.slice(i,j+1).reverse(), best.slice(j+1));
-        const len = routeLength(candidate, startLat, startLon, endLat, endLon);
-        if (len < bestLen - 1e-6){
-          best = candidate; bestLen = len; improved = true;
-        }
+// Soluzione esatta Held-Karp per un massimo di 14 tappe. Considera partenza,
+// tutte le strade tra le tappe e punto di ritorno come estremi fissi.
+function exactFixedRoute(count, matrix, stopOffset, startIndex, endIndex){
+  if (count===0) return [];
+  if (count===1) return [0];
+  const size = 1 << count;
+  const dp = Array.from({length:size}, ()=>new Float64Array(count).fill(Infinity));
+  const prev = Array.from({length:size}, ()=>new Int16Array(count).fill(-1));
+  for(let j=0;j<count;j++) dp[1<<j][j] = startIndex==null ? 0 : matrix[startIndex][stopOffset+j];
+  for(let mask=1; mask<size; mask++){
+    for(let j=0;j<count;j++){
+      if(!(mask & (1<<j))) continue;
+      const oldMask = mask ^ (1<<j);
+      if(!oldMask) continue;
+      for(let k=0;k<count;k++){
+        if(!(oldMask & (1<<k))) continue;
+        const val = dp[oldMask][k] + matrix[stopOffset+k][stopOffset+j];
+        if(val < dp[mask][j]){ dp[mask][j]=val; prev[mask][j]=k; }
+      }
+    }
+  }
+  const full=size-1;
+  let last=0, best=Infinity;
+  for(let j=0;j<count;j++){
+    const val=dp[full][j] + (endIndex==null ? 0 : matrix[stopOffset+j][endIndex]);
+    if(val<best){best=val; last=j;}
+  }
+  const order=[];
+  let mask=full;
+  while(last>=0){
+    order.push(last);
+    const p=prev[mask][last];
+    mask ^= (1<<last);
+    last=p;
+  }
+  return order.reverse();
+}
+
+function greedyMatrixRoute(count, matrix, stopOffset, startIndex, endIndex){
+  const remaining=Array.from({length:count},(_,i)=>i), order=[];
+  let cur=startIndex;
+  while(remaining.length){
+    let bestPos=0, best=Infinity;
+    for(let p=0;p<remaining.length;p++){
+      const j=remaining[p];
+      let score = cur==null ? 0 : matrix[cur][stopOffset+j];
+      // Piccolo sguardo al ritorno per evitare di lasciare dalla parte sbagliata
+      // una tappa molto lontana dal punto finale.
+      if(remaining.length===1 && endIndex!=null) score += matrix[stopOffset+j][endIndex];
+      if(score<best){best=score; bestPos=p;}
+    }
+    const next=remaining.splice(bestPos,1)[0];
+    order.push(next); cur=stopOffset+next;
+  }
+  return order;
+}
+
+function improveMatrixRoute(order, matrix, stopOffset, startIndex, endIndex){
+  let best=[...order], bestLen=matrixRouteLength(best,matrix,stopOffset,startIndex,endIndex);
+  let improved=true, guard=0;
+  while(improved && guard++<100){
+    improved=false;
+    for(let i=0;i<best.length;i++){
+      for(let j=i+1;j<best.length;j++){
+        const candidate=best.slice(0,i).concat(best.slice(i,j+1).reverse(),best.slice(j+1));
+        const len=matrixRouteLength(candidate,matrix,stopOffset,startIndex,endIndex);
+        if(len<bestLen-0.5){best=candidate; bestLen=len; improved=true;}
+      }
+    }
+    for(let i=0;i<best.length;i++){
+      const node=best[i], without=best.slice(0,i).concat(best.slice(i+1));
+      for(let j=0;j<=without.length;j++){
+        const candidate=without.slice(0,j).concat([node],without.slice(j));
+        const len=matrixRouteLength(candidate,matrix,stopOffset,startIndex,endIndex);
+        if(len<bestLen-0.5){best=candidate; bestLen=len; improved=true;}
       }
     }
   }
@@ -716,99 +724,80 @@ function twoOptImprove(path, startLat, startLon, endLat, endLon){
 }
 
 function estimateRouteKm(stops){
-  let km = 0, prevLat=null, prevLon=null;
+  let km=0, prevLat=null, prevLon=null;
   stops.forEach(s=>{
-    if (s.lat && s.lon){
-      if (prevLat!=null) km += haversine(prevLat,prevLon,s.lat,s.lon);
-      prevLat = s.lat; prevLon = s.lon;
+    if(Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon))){
+      if(prevLat!=null) km+=haversine(prevLat,prevLon,Number(s.lat),Number(s.lon));
+      prevLat=Number(s.lat); prevLon=Number(s.lon);
     }
   });
   return km;
 }
 
-// Or-opt: prova a spostare una singola tappa in un'altra posizione della
-// sequenza. Combinato col 2-opt (che inverte tratti) è lo schema classico
-// usato nei motori di instradamento "vehicle routing" professionali:
-// il 2-opt elimina gli incroci, l'Or-opt elimina le deviazioni fuori strada.
-function orOptImprove(path, startLat, startLon, endLat, endLon){
-  if (path.length < 3) return path;
-  let best = [...path];
-  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 200){
-    improved = false;
-    guard++;
-    for (let i=0; i<best.length; i++){
-      const node = best[i];
-      const without = best.slice(0,i).concat(best.slice(i+1));
-      for (let j=0; j<=without.length; j++){
-        const candidate = without.slice(0,j).concat([node], without.slice(j));
-        const len = routeLength(candidate, startLat, startLon, endLat, endLon);
-        if (len < bestLen - 1e-6){
-          best = candidate; bestLen = len; improved = true;
-        }
-      }
-    }
+async function optimize(startLat, startLon){
+  const beforeOrder=currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+  const pending=currentStops.filter(s=>!s.done && s.kind!=='home');
+  const doneStops=currentStops.filter(s=>s.done && s.kind!=='home');
+  const withCoords=pending.filter(s=>Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon)));
+  const withoutCoords=pending.filter(s=>!Number.isFinite(Number(s.lat)) || !Number.isFinite(Number(s.lon)));
+  if(withCoords.length<2){ showToast('Servono almeno due tappe con coordinate valide'); return; }
+
+  const hasStart=Number.isFinite(Number(startLat)) && Number.isFinite(Number(startLon));
+  const hasEnd=!!HOME_SETTINGS.enabled && Number.isFinite(Number(HOME_SETTINGS.lat)) && Number.isFinite(Number(HOME_SETTINGS.lon));
+  const points=[];
+  let startIndex=null, endIndex=null;
+  if(hasStart){ startIndex=points.length; points.push({lat:Number(startLat),lon:Number(startLon)}); }
+  const stopOffset=points.length;
+  withCoords.forEach(s=>points.push({lat:Number(s.lat),lon:Number(s.lon)}));
+  if(hasEnd){ endIndex=points.length; points.push({lat:Number(HOME_SETTINGS.lat),lon:Number(HOME_SETTINGS.lon)}); }
+
+  showToast('Calcolo delle distanze stradali reali...');
+  let matrix, usedRoads=true;
+  try{ matrix=await getDrivingMatrix(points); }
+  catch(e){ matrix=buildAirMatrix(points); usedRoads=false; }
+
+  let indexes;
+  if(withCoords.length<=14){
+    indexes=exactFixedRoute(withCoords.length,matrix,stopOffset,startIndex,endIndex);
+  }else{
+    indexes=greedyMatrixRoute(withCoords.length,matrix,stopOffset,startIndex,endIndex);
+    indexes=improveMatrixRoute(indexes,matrix,stopOffset,startIndex,endIndex);
   }
-  return best;
-}
-
-function optimize(startLat, startLon){
-  const beforeOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
-
-  const pending = currentStops.filter(s=>!s.done && s.kind!=='home');
-  const doneStops = currentStops.filter(s=>s.done && s.kind!=='home');
-  const withCoords = pending.filter(s=>s.lat && s.lon);
-  const withoutCoords = pending.filter(s=>!s.lat || !s.lon);
-
-  const endLat = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lat : null);
-  const endLon = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lon : null);
-
-  let ordered = (startLat!=null && startLon!=null)
-    ? bestFixedEndpointsOrder(withCoords, startLat, startLon, endLat, endLon)
-    : bestFreeStartOrder(withCoords, endLat, endLon);
-  if (ordered.length >= 2 && ordered.length <= 30){
-    // due passate alternate: elimina prima gli incroci, poi le tappe fuori
-    // percorso, poi rifinisce ancora — converge verso un ottimo locale solido
-    ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
-    ordered = orOptImprove(ordered, startLat, startLon, endLat, endLon);
-    ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
-  }
-
-  currentStops = [...doneStops, ...ordered, ...withoutCoords];
-  currentDayAutoOptimized = true;
+  const ordered=indexes.map(i=>withCoords[i]);
+  currentStops=[...doneStops,...ordered,...withoutCoords];
+  currentDayAutoOptimized=true;
   render();
-  persistCurrent();
+  await persistCurrent();
 
-  const afterOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
-  const changed = beforeOrder !== afterOrder;
-  if (startLat!=null){
-    showToast(changed ? 'Giro ottimizzato dalla posizione attuale fino al punto di ritorno' : "Il giro era già nell'ordine più efficiente tra partenza e ritorno");
-  } else {
-    showToast(changed ? "Giro riordinato, ma senza GPS: attivalo per un risultato basato sulla tua posizione reale" : "Nessuna modifica: attiva la localizzazione per un giro ottimizzato dalla tua posizione");
+  const afterOrder=currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+  const changed=beforeOrder!==afterOrder;
+  if(usedRoads){
+    showToast(changed ? 'Giro ottimizzato sulle strade reali fino al ritorno' : 'Il giro è già il più breve sulle strade reali');
+  }else{
+    showToast(changed ? 'Servizio stradale non raggiungibile: usata la distanza in linea d’aria' : 'Nessuna modifica; servizio stradale non raggiungibile');
   }
 }
+
 function runOptimize(){
-  if (navigator.geolocation){
+  if(navigator.geolocation){
     showToast('Rilevamento posizione GPS...');
     navigator.geolocation.getCurrentPosition(
-      pos=>optimize(pos.coords.latitude, pos.coords.longitude),
-      (err)=>{
-        let msg = 'Posizione non disponibile';
-        if (err){
-          if (err.code===1) msg = 'Permesso di localizzazione negato: attivalo nelle impostazioni del sito in Chrome (tocca il lucchetto nella barra indirizzi)';
-          else if (err.code===2) msg = 'GPS irraggiungibile al momento (segnale assente)';
-          else if (err.code===3) msg = 'Richiesta posizione scaduta (timeout)';
+      pos=>{ void optimize(pos.coords.latitude,pos.coords.longitude); },
+      err=>{
+        let msg='Posizione non disponibile';
+        if(err){
+          if(err.code===1) msg='Permesso di localizzazione negato: attivalo nelle impostazioni del sito';
+          else if(err.code===2) msg='GPS irraggiungibile al momento';
+          else if(err.code===3) msg='Richiesta posizione scaduta';
         }
-        showToast(msg);
-        optimize(null,null);
+        showToast(msg+'; ottimizzo senza punto di partenza GPS');
+        void optimize(null,null);
       },
-      {timeout:8000, enableHighAccuracy:true}
+      {timeout:10000,maximumAge:30000,enableHighAccuracy:true}
     );
-  } else {
+  }else{
     showToast('Il browser non supporta la geolocalizzazione');
-    optimize(null,null);
+    void optimize(null,null);
   }
 }
 
