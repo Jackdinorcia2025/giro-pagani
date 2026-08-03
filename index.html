@@ -439,12 +439,20 @@ async function persistCurrent(){
 }
 
 // Automatically runs the optimizer from the current GPS position the first
-// time a day is opened (so the route is always logical without a manual tap).
-// After that, the person can still re-run it any time with the button.
-function maybeAutoOptimize(){
+// time a day is opened — ma SOLO se il permesso di posizione è già stato
+// concesso in precedenza. Non chiediamo mai il permesso in automatico senza
+// un'azione esplicita della persona: un popup a sorpresa all'apertura
+// dell'app rischia di essere negato per riflesso, e una volta negato resta
+// negato anche per i click manuali successivi su "Ottimizza".
+async function maybeAutoOptimize(){
   if (currentDayAutoOptimized) return;
   const withCoords = currentStops.filter(s=>s.kind!=='home' && !s.done && s.lat && s.lon);
   if (withCoords.length < 2 || !navigator.geolocation) return;
+  if (!navigator.permissions || !navigator.permissions.query) return;
+  let status;
+  try{ status = await navigator.permissions.query({name:'geolocation'}); }
+  catch(e){ return; }
+  if (status.state !== 'granted') return;
   navigator.geolocation.getCurrentPosition(
     pos => optimize(pos.coords.latitude, pos.coords.longitude),
     () => { currentDayAutoOptimized = true; persistCurrent(); },
@@ -622,6 +630,24 @@ function nearestNeighborOrder(stops, startLat, startLon){
   return ordered;
 }
 
+// Quando non c'è una posizione GPS reale da cui partire, non ha senso
+// ancorarsi arbitrariamente al primo punto della lista: proviamo ogni tappa
+// come possibile partenza e teniamo quella che rende il percorso complessivo
+// più corto (compreso l'arrivo a Casa, se impostata).
+function bestFreeStartOrder(stops, endLat, endLon){
+  if (stops.length === 0) return [];
+  if (stops.length === 1) return [...stops];
+  let bestOrder = null, bestLen = Infinity;
+  for (let k=0; k<stops.length; k++){
+    const start = stops[k];
+    const rest = stops.slice(0,k).concat(stops.slice(k+1));
+    const order = [start, ...nearestNeighborOrder(rest, start.lat, start.lon)];
+    const len = routeLength(order, null, null, endLat, endLon);
+    if (len < bestLen){ bestLen = len; bestOrder = order; }
+  }
+  return bestOrder;
+}
+
 function routeLength(path, startLat, startLon, endLat, endLon){
   let total = 0;
   let curLat = startLat, curLon = startLon;
@@ -707,7 +733,9 @@ function optimize(startLat, startLon){
   const endLat = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lat : null);
   const endLon = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lon : null);
 
-  let ordered = nearestNeighborOrder(withCoords, startLat, startLon);
+  let ordered = (startLat!=null && startLon!=null)
+    ? nearestNeighborOrder(withCoords, startLat, startLon)
+    : bestFreeStartOrder(withCoords, endLat, endLon);
   if (ordered.length >= 3 && ordered.length <= 30){
     // due passate alternate: elimina prima gli incroci, poi le tappe fuori
     // percorso, poi rifinisce ancora — converge verso un ottimo locale solido
