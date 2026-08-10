@@ -727,50 +727,18 @@ function nearestNeighborOrder(stops, startLat, startLon){
   return ordered;
 }
 
-// Variante "dal più lontano al più vicino": ad ogni passo sceglie la tappa
-// PIÙ distante da dove ci si trova nel percorso simulato, invece della più
-// vicina. Il risultato grezzo tende a zigzagare, ma il raffinamento 2-opt +
-// Or-opt successivo lo rende comunque efficiente — con la caratteristica di
-// allontanarsi subito e riavvicinarsi progressivamente verso la fine/casa.
-function farthestNeighborOrder(stops, startLat, startLon){
-  const remaining = [...stops];
-  const ordered = [];
-  let curLat = startLat, curLon = startLon;
-  while(remaining.length){
-    let bestIdx = 0, bestDist = -Infinity;
-    if (curLat==null){
-      bestIdx = 0;
-    } else {
-      remaining.forEach((s,idx)=>{
-        const d = haversine(curLat,curLon,s.lat,s.lon);
-        if(d>bestDist){bestDist=d; bestIdx=idx;}
-      });
-    }
-    const next = remaining.splice(bestIdx,1)[0];
-    ordered.push(next);
-    curLat = next.lat; curLon = next.lon;
-  }
-  return ordered;
-}
-
-function seedOrder(stops, startLat, startLon, mode){
-  return mode === 'far-near'
-    ? farthestNeighborOrder(stops, startLat, startLon)
-    : nearestNeighborOrder(stops, startLat, startLon);
-}
-
 // Quando non c'è una posizione GPS reale da cui partire, non ha senso
 // ancorarsi arbitrariamente al primo punto della lista: proviamo ogni tappa
 // come possibile partenza e teniamo quella che rende il percorso complessivo
 // più corto (compreso l'arrivo a Casa, se impostata).
-function bestFreeStartOrder(stops, endLat, endLon, mode){
+function bestFreeStartOrder(stops, endLat, endLon){
   if (stops.length === 0) return [];
   if (stops.length === 1) return [...stops];
   let bestOrder = null, bestLen = Infinity;
   for (let k=0; k<stops.length; k++){
     const start = stops[k];
     const rest = stops.slice(0,k).concat(stops.slice(k+1));
-    const order = [start, ...seedOrder(rest, start.lat, start.lon, mode)];
+    const order = [start, ...nearestNeighborOrder(rest, start.lat, start.lon)];
     const len = routeLength(order, null, null, endLat, endLon);
     if (len < bestLen){ bestLen = len; bestOrder = order; }
   }
@@ -851,26 +819,39 @@ function orOptImprove(path, startLat, startLon, endLat, endLon){
   return best;
 }
 
-// Passata singola di 2-opt: corregge solo gli incroci più evidenti senza
-// iterare fino alla piena convergenza. Usata per la modalità "lontano →
-// vicino": una rifinitura completa fino a convergenza tende a trovare
-// sempre lo stesso ottimo globale della modalità "vicino → lontano",
-// cancellando la caratteristica voluta (allontanarsi subito, poi
-// riavvicinarsi). Una passata sola ripulisce il percorso senza snaturarlo.
-function singlePassTwoOpt(path, startLat, startLon, endLat, endLon){
+// Rifinisce con 2-opt + Or-opt + 2-opt (schema completo) un percorso che
+// parte da (fromLat,fromLon) e arriva a (endLat,endLon).
+function fullRefine(path, fromLat, fromLon, endLat, endLon){
   if (path.length < 3) return path;
-  let best = [...path];
-  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
-  for (let i=0; i<best.length-1; i++){
-    for (let j=i+1; j<best.length; j++){
-      const candidate = best.slice(0,i).concat(best.slice(i,j+1).reverse(), best.slice(j+1));
-      const len = routeLength(candidate, startLat, startLon, endLat, endLon);
-      if (len < bestLen - 1e-6){
-        best = candidate; bestLen = len;
-      }
-    }
-  }
-  return best;
+  let out = twoOptImprove(path, fromLat, fromLon, endLat, endLon);
+  out = orOptImprove(out, fromLat, fromLon, endLat, endLon);
+  out = twoOptImprove(out, fromLat, fromLon, endLat, endLon);
+  return out;
+}
+
+// Modalità "dal più lontano al più vicino": un raffinamento di distanza
+// puro (2-opt/Or-opt) tende SEMPRE a ricondursi al percorso più breve, che
+// quasi sempre inizia dal punto vicino — quindi rifinire l'intero giro
+// distrugge la caratteristica "parti lontano" che qui serve. La soluzione
+// corretta è fissare la tappa più lontana (dalla posizione di partenza, o
+// da Casa se il GPS non è disponibile) come prima tappa OBBLIGATA, e poi
+// ottimizzare a fondo solo il resto del percorso da lì fino a Casa.
+function buildFarNearOrder(stops, startLat, startLon, endLat, endLon){
+  if (stops.length === 0) return [];
+  if (stops.length === 1) return [...stops];
+  const refLat = (startLat!=null) ? startLat : endLat;
+  const refLon = (startLon!=null) ? startLon : endLon;
+  let farIdx = 0, farDist = -Infinity;
+  stops.forEach((s,idx)=>{
+    const d = (refLat!=null) ? haversine(refLat,refLon,s.lat,s.lon) : idx;
+    if (d > farDist){ farDist = d; farIdx = idx; }
+  });
+  const first = stops[farIdx];
+  const rest = stops.slice(0,farIdx).concat(stops.slice(farIdx+1));
+  if (rest.length === 0) return [first];
+  let ordered = nearestNeighborOrder(rest, first.lat, first.lon);
+  ordered = fullRefine(ordered, first.lat, first.lon, endLat, endLon);
+  return [first, ...ordered];
 }
 
 function optimize(startLat, startLon){
@@ -884,21 +865,14 @@ function optimize(startLat, startLon){
   const endLat = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lat : null);
   const endLon = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lon : null);
 
-  let ordered = (startLat!=null && startLon!=null)
-    ? seedOrder(withCoords, startLat, startLon, ROUTE_MODE)
-    : bestFreeStartOrder(withCoords, endLat, endLon, ROUTE_MODE);
-  if (ordered.length >= 3 && ordered.length <= 30){
-    if (ROUTE_MODE === 'far-near'){
-      // rifinitura leggera: ripulisce solo gli incroci peggiori, mantenendo
-      // la caratteristica "prima lontano, poi vicino"
-      ordered = singlePassTwoOpt(ordered, startLat, startLon, endLat, endLon);
-    } else {
-      // due passate alternate: elimina prima gli incroci, poi le tappe fuori
-      // percorso, poi rifinisce ancora — converge verso un ottimo locale solido
-      ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
-      ordered = orOptImprove(ordered, startLat, startLon, endLat, endLon);
-      ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
-    }
+  let ordered;
+  if (ROUTE_MODE === 'far-near'){
+    ordered = buildFarNearOrder(withCoords, startLat, startLon, endLat, endLon);
+  } else {
+    ordered = (startLat!=null && startLon!=null)
+      ? nearestNeighborOrder(withCoords, startLat, startLon)
+      : bestFreeStartOrder(withCoords, endLat, endLon);
+    ordered = fullRefine(ordered, startLat, startLon, endLat, endLon);
   }
 
   currentStops = [...doneStops, ...ordered, ...withoutCoords];
