@@ -38,7 +38,7 @@
 }
 *{box-sizing:border-box; -webkit-tap-highlight-color: transparent;}
 html,body{margin:0; padding:0; background:var(--bg); color:var(--text); font-family:'IBM Plex Sans', system-ui, sans-serif;}
-body{min-height:100vh; padding-bottom: calc(90px + var(--safe-bottom));}
+body{min-height:100vh; padding-bottom: calc(130px + var(--safe-bottom));}
 .wrap{max-width:480px; margin:0 auto; position:relative; min-height:100vh;}
 
 /* HEADER */
@@ -104,13 +104,17 @@ main{padding: 18px 18px 10px;}
 
 /* BOTTOM BAR */
 .bottom-bar{position:fixed; left:0; right:0; bottom:0; z-index:30; display:flex; justify-content:center;}
-.bottom-inner{max-width:480px; width:100%; display:flex; gap:8px; padding:10px 18px calc(12px + var(--safe-bottom)); background:linear-gradient(0deg, var(--bg) 60%, transparent); }
+.bottom-inner{max-width:480px; width:100%; display:flex; flex-direction:column; gap:8px; padding:8px 18px calc(12px + var(--safe-bottom)); background:linear-gradient(0deg, var(--bg) 75%, transparent); }
+.mode-row{display:flex; gap:6px;}
+.mode-btn{flex:1; text-align:center; padding:7px 4px; border-radius:9px; background:var(--surface); border:1px solid var(--line); color:var(--text-muted); font-size:11px; font-weight:600; cursor:pointer;}
+.mode-btn.active{background:var(--teal-dim); color:var(--teal); border-color:var(--teal);}
+.bottom-buttons-row{display:flex; gap:8px;}
 .pill-btn{flex:1; height:46px; border-radius:23px; border:none; font-family:'Space Grotesk', sans-serif; font-weight:600; font-size:13px; display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer;}
 .pill-btn.primary{background:var(--teal); color:#0A1C19;}
 .pill-btn.secondary{background:var(--surface); border:1px solid var(--line); color:var(--text);}
 .pill-btn:active{filter:brightness(0.92);}
 
-.fab{position:fixed; right:calc(18px + (100vw - 480px) / 2); bottom:calc(78px + var(--safe-bottom)); width:52px; height:52px; border-radius:50%; background:var(--teal); color:#0A1C19; border:none; font-size:26px; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 18px rgba(0,0,0,0.4); z-index:31; cursor:pointer;}
+.fab{position:fixed; right:calc(18px + (100vw - 480px) / 2); bottom:calc(118px + var(--safe-bottom)); width:52px; height:52px; border-radius:50%; background:var(--teal); color:#0A1C19; border:none; font-size:26px; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 18px rgba(0,0,0,0.4); z-index:31; cursor:pointer;}
 @media (max-width:480px){ .fab{ right:18px; } }
 
 /* MODAL / SHEET */
@@ -187,8 +191,14 @@ label.small{font-size:11px; color:var(--text-muted); text-transform:uppercase; l
 
   <div class="bottom-bar">
     <div class="bottom-inner">
-      <button class="pill-btn secondary" id="btnOptimize">&#8635; Ottimizza</button>
-      <button class="pill-btn primary" id="btnNavAll">&#9654; Naviga tutto</button>
+      <div class="mode-row">
+        <div class="mode-btn active" id="modeNearFar">Vicino → Lontano</div>
+        <div class="mode-btn" id="modeFarNear">Lontano → Vicino</div>
+      </div>
+      <div class="bottom-buttons-row">
+        <button class="pill-btn secondary" id="btnOptimize">&#8635; Ottimizza</button>
+        <button class="pill-btn primary" id="btnNavAll">&#9654; Naviga tutto</button>
+      </div>
     </div>
   </div>
 
@@ -345,15 +355,44 @@ async function saveHomeSettings(){
   try{ await storageAdapter.set('home_settings', JSON.stringify(HOME_SETTINGS), false); }
   catch(e){ console.error(e); }
 }
-let HOME = {lat: 44.7232993, lon: 11.2344684};
+let ROUTE_MODE = 'near-far'; // 'near-far' = dal più vicino al più lontano, 'far-near' = dal più lontano al più vicino
+async function loadRouteMode(){
+  try{
+    const r = await storageAdapter.get('route_mode', false);
+    if (r && r.value && (r.value === 'near-far' || r.value === 'far-near')) ROUTE_MODE = r.value;
+  }catch(e){}
+}
+async function saveRouteMode(){
+  try{ await storageAdapter.set('route_mode', ROUTE_MODE, false); }
+  catch(e){ console.error(e); }
+}
 
 let currentDate;
 let currentStops = []; // working array of stop objects for the day
 let addTab = 'search';
 
+// Un punto con coordinate palesemente fuori dall'Italia (es. per un dato
+// corrotto, un id abbinato per errore, o un punto mai geolocalizzato bene
+// nella mappa) non deve mai entrare nel calcolo del percorso: causerebbe
+// balzi di migliaia di km che rovinano sia l'ottimizzazione sia le statistiche.
+// In quel caso lo trattiamo come "senza coordinate", esattamente come un
+// punto mai abbinato alla mappa.
+function isPlausibleCoord(lat, lon){
+  return typeof lat === 'number' && typeof lon === 'number' &&
+    !isNaN(lat) && !isNaN(lon) &&
+    lat >= 35 && lat <= 48 && lon >= 6 && lon <= 19;
+}
+
 function rebuildDerived(){
   const kmzById = {};
-  RAW_KMZ.forEach(p=>{ kmzById[p.id] = p; });
+  const scartati = [];
+  RAW_KMZ.forEach(p=>{
+    if (isPlausibleCoord(p.lat, p.lon)) kmzById[p.id] = p;
+    else scartati.push(p);
+  });
+  if (scartati.length){
+    console.warn('Punti mappa scartati per coordinate non plausibili (fuori Italia):', scartati);
+  }
   VISITS = RAW_GIRO.map(v=>{
     const p = kmzById[v.id];
     return {...v, lat: p ? p.lat : null, lon: p ? p.lon : null};
@@ -421,7 +460,11 @@ async function initDayState(date){
   // merge: base visits (in case data changed) + saved extras, ordered per saved.order
   const byId = {};
   base.forEach(s=>byId[s.id]=s);
-  (saved.extras||[]).forEach(e=>byId[e.id]={...e});
+  (saved.extras||[]).forEach(e=>{
+    const clean = {...e};
+    if (!isPlausibleCoord(clean.lat, clean.lon)){ clean.lat = null; clean.lon = null; }
+    byId[e.id] = clean;
+  });
   let order = saved.order && saved.order.length ? saved.order.filter(id=>byId[id]) : Object.keys(byId);
   // include any base visit not yet in order (newly appeared)
   base.forEach(s=>{ if(!order.includes(s.id)) order.push(s.id); });
@@ -601,7 +644,7 @@ function navigateAll(){
   window.open(url, '_blank');
 }
 
-// ---------- route optimization with real driving distances ----------
+// ---------- route optimization (nearest neighbor + 2-opt) ----------
 function haversine(lat1,lon1,lat2,lon2){
   const R=6371, toRad=x=>x*Math.PI/180;
   const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
@@ -609,114 +652,106 @@ function haversine(lat1,lon1,lat2,lon2){
   return R*2*Math.asin(Math.sqrt(a));
 }
 
-function buildAirMatrix(points){
-  return points.map(a=>points.map(b=>a===b ? 0 : haversine(a.lat,a.lon,b.lat,b.lon)*1000));
-}
-
-// OSRM restituisce una matrice di distanze sulla rete stradale, non in linea d'aria.
-// Se il servizio non è raggiungibile l'app continua a funzionare usando Haversine.
-async function getDrivingMatrix(points){
-  if (points.length < 2) return buildAirMatrix(points);
-  const coords = points.map(p=>`${Number(p.lon).toFixed(6)},${Number(p.lat).toFixed(6)}`).join(';');
-  const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
-  const controller = new AbortController();
-  const timer = setTimeout(()=>controller.abort(), 12000);
-  try{
-    const res = await fetch(url, {signal:controller.signal, cache:'no-store'});
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (data.code !== 'Ok' || !Array.isArray(data.distances)) throw new Error('Matrice stradale non valida');
-    const fallback = buildAirMatrix(points);
-    return data.distances.map((row,i)=>row.map((v,j)=>Number.isFinite(v) ? v : fallback[i][j]));
-  } finally {
-    clearTimeout(timer);
+function nearestNeighborOrder(stops, startLat, startLon){
+  const remaining = [...stops];
+  const ordered = [];
+  let curLat = startLat, curLon = startLon;
+  while(remaining.length){
+    let bestIdx = 0, bestDist = Infinity;
+    if (curLat==null){
+      bestIdx = 0;
+    } else {
+      remaining.forEach((s,idx)=>{
+        const d = haversine(curLat,curLon,s.lat,s.lon);
+        if(d<bestDist){bestDist=d; bestIdx=idx;}
+      });
+    }
+    const next = remaining.splice(bestIdx,1)[0];
+    ordered.push(next);
+    curLat = next.lat; curLon = next.lon;
   }
+  return ordered;
 }
 
-function matrixRouteLength(order, matrix, stopOffset, startIndex, endIndex){
-  if (!order.length) return (startIndex!=null && endIndex!=null) ? matrix[startIndex][endIndex] : 0;
+// Variante "dal più lontano al più vicino": ad ogni passo sceglie la tappa
+// PIÙ distante da dove ci si trova nel percorso simulato, invece della più
+// vicina. Il risultato grezzo tende a zigzagare, ma il raffinamento 2-opt +
+// Or-opt successivo lo rende comunque efficiente — con la caratteristica di
+// allontanarsi subito e riavvicinarsi progressivamente verso la fine/casa.
+function farthestNeighborOrder(stops, startLat, startLon){
+  const remaining = [...stops];
+  const ordered = [];
+  let curLat = startLat, curLon = startLon;
+  while(remaining.length){
+    let bestIdx = 0, bestDist = -Infinity;
+    if (curLat==null){
+      bestIdx = 0;
+    } else {
+      remaining.forEach((s,idx)=>{
+        const d = haversine(curLat,curLon,s.lat,s.lon);
+        if(d>bestDist){bestDist=d; bestIdx=idx;}
+      });
+    }
+    const next = remaining.splice(bestIdx,1)[0];
+    ordered.push(next);
+    curLat = next.lat; curLon = next.lon;
+  }
+  return ordered;
+}
+
+function seedOrder(stops, startLat, startLon, mode){
+  return mode === 'far-near'
+    ? farthestNeighborOrder(stops, startLat, startLon)
+    : nearestNeighborOrder(stops, startLat, startLon);
+}
+
+// Quando non c'è una posizione GPS reale da cui partire, non ha senso
+// ancorarsi arbitrariamente al primo punto della lista: proviamo ogni tappa
+// come possibile partenza e teniamo quella che rende il percorso complessivo
+// più corto (compreso l'arrivo a Casa, se impostata).
+function bestFreeStartOrder(stops, endLat, endLon, mode){
+  if (stops.length === 0) return [];
+  if (stops.length === 1) return [...stops];
+  let bestOrder = null, bestLen = Infinity;
+  for (let k=0; k<stops.length; k++){
+    const start = stops[k];
+    const rest = stops.slice(0,k).concat(stops.slice(k+1));
+    const order = [start, ...seedOrder(rest, start.lat, start.lon, mode)];
+    const len = routeLength(order, null, null, endLat, endLon);
+    if (len < bestLen){ bestLen = len; bestOrder = order; }
+  }
+  return bestOrder;
+}
+
+function routeLength(path, startLat, startLon, endLat, endLon){
   let total = 0;
-  if (startIndex!=null) total += matrix[startIndex][stopOffset + order[0]];
-  for(let i=0;i<order.length-1;i++) total += matrix[stopOffset+order[i]][stopOffset+order[i+1]];
-  if (endIndex!=null) total += matrix[stopOffset+order[order.length-1]][endIndex];
+  let curLat = startLat, curLon = startLon;
+  for (const p of path){
+    if (curLat!=null) total += haversine(curLat,curLon,p.lat,p.lon);
+    curLat = p.lat; curLon = p.lon;
+  }
+  if (endLat!=null && curLat!=null) total += haversine(curLat,curLon,endLat,endLon);
   return total;
 }
 
-// Soluzione esatta Held-Karp per un massimo di 14 tappe. Considera partenza,
-// tutte le strade tra le tappe e punto di ritorno come estremi fissi.
-function exactFixedRoute(count, matrix, stopOffset, startIndex, endIndex){
-  if (count===0) return [];
-  if (count===1) return [0];
-  const size = 1 << count;
-  const dp = Array.from({length:size}, ()=>new Float64Array(count).fill(Infinity));
-  const prev = Array.from({length:size}, ()=>new Int16Array(count).fill(-1));
-  for(let j=0;j<count;j++) dp[1<<j][j] = startIndex==null ? 0 : matrix[startIndex][stopOffset+j];
-  for(let mask=1; mask<size; mask++){
-    for(let j=0;j<count;j++){
-      if(!(mask & (1<<j))) continue;
-      const oldMask = mask ^ (1<<j);
-      if(!oldMask) continue;
-      for(let k=0;k<count;k++){
-        if(!(oldMask & (1<<k))) continue;
-        const val = dp[oldMask][k] + matrix[stopOffset+k][stopOffset+j];
-        if(val < dp[mask][j]){ dp[mask][j]=val; prev[mask][j]=k; }
-      }
-    }
-  }
-  const full=size-1;
-  let last=0, best=Infinity;
-  for(let j=0;j<count;j++){
-    const val=dp[full][j] + (endIndex==null ? 0 : matrix[stopOffset+j][endIndex]);
-    if(val<best){best=val; last=j;}
-  }
-  const order=[];
-  let mask=full;
-  while(last>=0){
-    order.push(last);
-    const p=prev[mask][last];
-    mask ^= (1<<last);
-    last=p;
-  }
-  return order.reverse();
-}
-
-function greedyMatrixRoute(count, matrix, stopOffset, startIndex, endIndex){
-  const remaining=Array.from({length:count},(_,i)=>i), order=[];
-  let cur=startIndex;
-  while(remaining.length){
-    let bestPos=0, best=Infinity;
-    for(let p=0;p<remaining.length;p++){
-      const j=remaining[p];
-      let score = cur==null ? 0 : matrix[cur][stopOffset+j];
-      // Piccolo sguardo al ritorno per evitare di lasciare dalla parte sbagliata
-      // una tappa molto lontana dal punto finale.
-      if(remaining.length===1 && endIndex!=null) score += matrix[stopOffset+j][endIndex];
-      if(score<best){best=score; bestPos=p;}
-    }
-    const next=remaining.splice(bestPos,1)[0];
-    order.push(next); cur=stopOffset+next;
-  }
-  return order;
-}
-
-function improveMatrixRoute(order, matrix, stopOffset, startIndex, endIndex){
-  let best=[...order], bestLen=matrixRouteLength(best,matrix,stopOffset,startIndex,endIndex);
-  let improved=true, guard=0;
-  while(improved && guard++<100){
-    improved=false;
-    for(let i=0;i<best.length;i++){
-      for(let j=i+1;j<best.length;j++){
-        const candidate=best.slice(0,i).concat(best.slice(i,j+1).reverse(),best.slice(j+1));
-        const len=matrixRouteLength(candidate,matrix,stopOffset,startIndex,endIndex);
-        if(len<bestLen-0.5){best=candidate; bestLen=len; improved=true;}
-      }
-    }
-    for(let i=0;i<best.length;i++){
-      const node=best[i], without=best.slice(0,i).concat(best.slice(i+1));
-      for(let j=0;j<=without.length;j++){
-        const candidate=without.slice(0,j).concat([node],without.slice(j));
-        const len=matrixRouteLength(candidate,matrix,stopOffset,startIndex,endIndex);
-        if(len<bestLen-0.5){best=candidate; bestLen=len; improved=true;}
+// 2-opt local search: tries reversing segments to shrink total distance,
+// keeping the current GPS position and the home address as fixed start/end.
+function twoOptImprove(path, startLat, startLon, endLat, endLon){
+  if (path.length < 3) return path;
+  let best = [...path];
+  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 300){
+    improved = false;
+    guard++;
+    for (let i=0; i<best.length-1; i++){
+      for (let j=i+1; j<best.length; j++){
+        const candidate = best.slice(0,i).concat(best.slice(i,j+1).reverse(), best.slice(j+1));
+        const len = routeLength(candidate, startLat, startLon, endLat, endLon);
+        if (len < bestLen - 1e-6){
+          best = candidate; bestLen = len; improved = true;
+        }
       }
     }
   }
@@ -724,80 +759,128 @@ function improveMatrixRoute(order, matrix, stopOffset, startIndex, endIndex){
 }
 
 function estimateRouteKm(stops){
-  let km=0, prevLat=null, prevLon=null;
+  let km = 0, prevLat=null, prevLon=null;
   stops.forEach(s=>{
-    if(Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon))){
-      if(prevLat!=null) km+=haversine(prevLat,prevLon,Number(s.lat),Number(s.lon));
-      prevLat=Number(s.lat); prevLon=Number(s.lon);
+    if (s.lat && s.lon){
+      if (prevLat!=null) km += haversine(prevLat,prevLon,s.lat,s.lon);
+      prevLat = s.lat; prevLon = s.lon;
     }
   });
   return km;
 }
 
-async function optimize(startLat, startLon){
-  const beforeOrder=currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
-  const pending=currentStops.filter(s=>!s.done && s.kind!=='home');
-  const doneStops=currentStops.filter(s=>s.done && s.kind!=='home');
-  const withCoords=pending.filter(s=>Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon)));
-  const withoutCoords=pending.filter(s=>!Number.isFinite(Number(s.lat)) || !Number.isFinite(Number(s.lon)));
-  if(withCoords.length<2){ showToast('Servono almeno due tappe con coordinate valide'); return; }
-
-  const hasStart=Number.isFinite(Number(startLat)) && Number.isFinite(Number(startLon));
-  const hasEnd=!!HOME_SETTINGS.enabled && Number.isFinite(Number(HOME_SETTINGS.lat)) && Number.isFinite(Number(HOME_SETTINGS.lon));
-  const points=[];
-  let startIndex=null, endIndex=null;
-  if(hasStart){ startIndex=points.length; points.push({lat:Number(startLat),lon:Number(startLon)}); }
-  const stopOffset=points.length;
-  withCoords.forEach(s=>points.push({lat:Number(s.lat),lon:Number(s.lon)}));
-  if(hasEnd){ endIndex=points.length; points.push({lat:Number(HOME_SETTINGS.lat),lon:Number(HOME_SETTINGS.lon)}); }
-
-  showToast('Calcolo delle distanze stradali reali...');
-  let matrix, usedRoads=true;
-  try{ matrix=await getDrivingMatrix(points); }
-  catch(e){ matrix=buildAirMatrix(points); usedRoads=false; }
-
-  let indexes;
-  if(withCoords.length<=14){
-    indexes=exactFixedRoute(withCoords.length,matrix,stopOffset,startIndex,endIndex);
-  }else{
-    indexes=greedyMatrixRoute(withCoords.length,matrix,stopOffset,startIndex,endIndex);
-    indexes=improveMatrixRoute(indexes,matrix,stopOffset,startIndex,endIndex);
+// Or-opt: prova a spostare una singola tappa in un'altra posizione della
+// sequenza. Combinato col 2-opt (che inverte tratti) è lo schema classico
+// usato nei motori di instradamento "vehicle routing" professionali:
+// il 2-opt elimina gli incroci, l'Or-opt elimina le deviazioni fuori strada.
+function orOptImprove(path, startLat, startLon, endLat, endLon){
+  if (path.length < 3) return path;
+  let best = [...path];
+  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 200){
+    improved = false;
+    guard++;
+    for (let i=0; i<best.length; i++){
+      const node = best[i];
+      const without = best.slice(0,i).concat(best.slice(i+1));
+      for (let j=0; j<=without.length; j++){
+        const candidate = without.slice(0,j).concat([node], without.slice(j));
+        const len = routeLength(candidate, startLat, startLon, endLat, endLon);
+        if (len < bestLen - 1e-6){
+          best = candidate; bestLen = len; improved = true;
+        }
+      }
+    }
   }
-  const ordered=indexes.map(i=>withCoords[i]);
-  currentStops=[...doneStops,...ordered,...withoutCoords];
-  currentDayAutoOptimized=true;
-  render();
-  await persistCurrent();
-
-  const afterOrder=currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
-  const changed=beforeOrder!==afterOrder;
-  if(usedRoads){
-    showToast(changed ? 'Giro ottimizzato sulle strade reali fino al ritorno' : 'Il giro è già il più breve sulle strade reali');
-  }else{
-    showToast(changed ? 'Servizio stradale non raggiungibile: usata la distanza in linea d’aria' : 'Nessuna modifica; servizio stradale non raggiungibile');
-  }
+  return best;
 }
 
+// Passata singola di 2-opt: corregge solo gli incroci più evidenti senza
+// iterare fino alla piena convergenza. Usata per la modalità "lontano →
+// vicino": una rifinitura completa fino a convergenza tende a trovare
+// sempre lo stesso ottimo globale della modalità "vicino → lontano",
+// cancellando la caratteristica voluta (allontanarsi subito, poi
+// riavvicinarsi). Una passata sola ripulisce il percorso senza snaturarlo.
+function singlePassTwoOpt(path, startLat, startLon, endLat, endLon){
+  if (path.length < 3) return path;
+  let best = [...path];
+  let bestLen = routeLength(best, startLat, startLon, endLat, endLon);
+  for (let i=0; i<best.length-1; i++){
+    for (let j=i+1; j<best.length; j++){
+      const candidate = best.slice(0,i).concat(best.slice(i,j+1).reverse(), best.slice(j+1));
+      const len = routeLength(candidate, startLat, startLon, endLat, endLon);
+      if (len < bestLen - 1e-6){
+        best = candidate; bestLen = len;
+      }
+    }
+  }
+  return best;
+}
+
+function optimize(startLat, startLon){
+  const beforeOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+
+  const pending = currentStops.filter(s=>!s.done && s.kind!=='home');
+  const doneStops = currentStops.filter(s=>s.done && s.kind!=='home');
+  const withCoords = pending.filter(s=>s.lat && s.lon);
+  const withoutCoords = pending.filter(s=>!s.lat || !s.lon);
+
+  const endLat = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lat : null);
+  const endLon = (HOME_SETTINGS.enabled ? HOME_SETTINGS.lon : null);
+
+  let ordered = (startLat!=null && startLon!=null)
+    ? seedOrder(withCoords, startLat, startLon, ROUTE_MODE)
+    : bestFreeStartOrder(withCoords, endLat, endLon, ROUTE_MODE);
+  if (ordered.length >= 3 && ordered.length <= 30){
+    if (ROUTE_MODE === 'far-near'){
+      // rifinitura leggera: ripulisce solo gli incroci peggiori, mantenendo
+      // la caratteristica "prima lontano, poi vicino"
+      ordered = singlePassTwoOpt(ordered, startLat, startLon, endLat, endLon);
+    } else {
+      // due passate alternate: elimina prima gli incroci, poi le tappe fuori
+      // percorso, poi rifinisce ancora — converge verso un ottimo locale solido
+      ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
+      ordered = orOptImprove(ordered, startLat, startLon, endLat, endLon);
+      ordered = twoOptImprove(ordered, startLat, startLon, endLat, endLon);
+    }
+  }
+
+  currentStops = [...doneStops, ...ordered, ...withoutCoords];
+  currentDayAutoOptimized = true;
+  render();
+  persistCurrent();
+
+  const afterOrder = currentStops.filter(s=>s.kind!=='home').map(s=>s.id).join('|');
+  const changed = beforeOrder !== afterOrder;
+  const modeLabel = ROUTE_MODE === 'far-near' ? 'dal più lontano al più vicino' : 'dal più vicino al più lontano';
+  if (startLat!=null){
+    showToast(changed ? `Giro ottimizzato (${modeLabel}) dalla tua posizione attuale` : "Il giro era già nell'ordine più efficiente");
+  } else {
+    showToast(changed ? "Giro riordinato, ma senza GPS: attivalo per un risultato basato sulla tua posizione reale" : "Nessuna modifica: attiva la localizzazione per un giro ottimizzato dalla tua posizione");
+  }
+}
 function runOptimize(){
-  if(navigator.geolocation){
+  if (navigator.geolocation){
     showToast('Rilevamento posizione GPS...');
     navigator.geolocation.getCurrentPosition(
-      pos=>{ void optimize(pos.coords.latitude,pos.coords.longitude); },
-      err=>{
-        let msg='Posizione non disponibile';
-        if(err){
-          if(err.code===1) msg='Permesso di localizzazione negato: attivalo nelle impostazioni del sito';
-          else if(err.code===2) msg='GPS irraggiungibile al momento';
-          else if(err.code===3) msg='Richiesta posizione scaduta';
+      pos=>optimize(pos.coords.latitude, pos.coords.longitude),
+      (err)=>{
+        let msg = 'Posizione non disponibile';
+        if (err){
+          if (err.code===1) msg = 'Permesso di localizzazione negato: attivalo nelle impostazioni del sito in Chrome (tocca il lucchetto nella barra indirizzi)';
+          else if (err.code===2) msg = 'GPS irraggiungibile al momento (segnale assente)';
+          else if (err.code===3) msg = 'Richiesta posizione scaduta (timeout)';
         }
-        showToast(msg+'; ottimizzo senza punto di partenza GPS');
-        void optimize(null,null);
+        showToast(msg);
+        optimize(null,null);
       },
-      {timeout:10000,maximumAge:30000,enableHighAccuracy:true}
+      {timeout:8000, enableHighAccuracy:true}
     );
-  }else{
+  } else {
     showToast('Il browser non supporta la geolocalizzazione');
-    void optimize(null,null);
+    optimize(null,null);
   }
 }
 
@@ -843,7 +926,8 @@ async function addManual(){
   const lat = latS ? parseFloat(latS.replace(',','.')) : null;
   const lon = lonS ? parseFloat(lonS.replace(',','.')) : null;
   const id = 'custom:'+Date.now();
-  currentStops.push({id, kind:'extra', nome, comune, tipo:null, lat: isNaN(lat)?null:lat, lon: isNaN(lon)?null:lon, durata:15, done:false});
+  const finalLat = isNaN(lat)?null:lat, finalLon = isNaN(lon)?null:lon;
+  currentStops.push({id, kind:'extra', nome, comune, tipo:null, lat: finalLat, lon: finalLon, durata:15, done:false});
   render();
   await persistCurrent();
   closeSheet();
@@ -851,7 +935,11 @@ async function addManual(){
   document.getElementById('manComune').value='';
   document.getElementById('manLat').value='';
   document.getElementById('manLon').value='';
-  showToast('Punto aggiunto al giro');
+  if (finalLat!=null && finalLon!=null && !isPlausibleCoord(finalLat, finalLon)){
+    showToast('Punto aggiunto, ma le coordinate sembrano fuori dall\'area Italia: controlla di non aver invertito latitudine e longitudine');
+  } else {
+    showToast('Punto aggiunto al giro');
+  }
 }
 
 let toastTimer;
@@ -878,6 +966,16 @@ document.getElementById('prevDay').addEventListener('click', ()=>changeDate(-1))
 document.getElementById('nextDay').addEventListener('click', ()=>changeDate(1));
 document.getElementById('btnOptimize').addEventListener('click', runOptimize);
 document.getElementById('btnNavAll').addEventListener('click', navigateAll);
+document.getElementById('modeNearFar').addEventListener('click', ()=>setRouteMode('near-far'));
+document.getElementById('modeFarNear').addEventListener('click', ()=>setRouteMode('far-near'));
+function setRouteMode(mode){
+  if (ROUTE_MODE === mode) return;
+  ROUTE_MODE = mode;
+  document.getElementById('modeNearFar').classList.toggle('active', mode==='near-far');
+  document.getElementById('modeFarNear').classList.toggle('active', mode==='far-near');
+  saveRouteMode();
+  showToast(mode==='near-far' ? 'Modalità: dal più vicino al più lontano' : 'Modalità: dal più lontano al più vicino');
+}
 document.getElementById('fabAdd').addEventListener('click', openSheet);
 document.getElementById('addOverlay').addEventListener('click', (e)=>{ if(e.target.id==='addOverlay') closeSheet(); });
 document.getElementById('tabSearch').addEventListener('click', ()=>switchTab('search'));
@@ -918,6 +1016,9 @@ async function refreshImportStatus(){
 (async function start(){
   await loadPersistedRawData();
   await loadHomeSettings();
+  await loadRouteMode();
+  document.getElementById('modeNearFar').classList.toggle('active', ROUTE_MODE==='near-far');
+  document.getElementById('modeFarNear').classList.toggle('active', ROUTE_MODE==='far-near');
   rebuildDerived();
   currentDate = pickInitialDate();
   await initDayState(currentDate);
@@ -1117,7 +1218,11 @@ async function handleKmzFile(file){
     await initDayState(currentDate);
     render();
     refreshImportStatus();
-    showToast(`Mappa aggiornata: ${RAW_KMZ.length} punti`);
+    const plausibili = points.filter(p=>isPlausibleCoord(p.lat,p.lon)).length;
+    const scartati = points.length - plausibili;
+    showToast(scartati>0
+      ? `Mappa aggiornata: ${plausibili} punti validi, ${scartati} scartati (coordinate fuori Italia)`
+      : `Mappa aggiornata: ${plausibili} punti`);
     closeSettings();
   }catch(err){
     alert('Errore nel file KMZ: ' + err.message);
