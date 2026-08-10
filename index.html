@@ -218,6 +218,7 @@ label.small{font-size:11px; color:var(--text-muted); text-transform:uppercase; l
       <div id="searchResults"></div>
     </div>
     <div id="paneManual" style="display:none;">
+      <button class="confirm-btn secondary-btn" id="btnUseMyLocation" style="margin-bottom:12px;">&#128205; Usa la mia posizione attuale</button>
       <label class="small">Nome punto</label>
       <input type="text" id="manNome" placeholder="Es. Cliente Rossi">
       <label class="small">Comune / indirizzo</label>
@@ -1037,6 +1038,28 @@ document.getElementById('tabSearch').addEventListener('click', ()=>switchTab('se
 document.getElementById('tabManual').addEventListener('click', ()=>switchTab('manual'));
 document.getElementById('searchInput').addEventListener('input', (e)=>doSearch(e.target.value));
 document.getElementById('btnAddManual').addEventListener('click', addManual);
+document.getElementById('btnUseMyLocation').addEventListener('click', ()=>{
+  if (!navigator.geolocation){ showToast('Il browser non supporta la geolocalizzazione'); return; }
+  const btn = document.getElementById('btnUseMyLocation');
+  const original = btn.textContent;
+  btn.textContent = 'Rilevamento posizione...';
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      document.getElementById('manLat').value = pos.coords.latitude.toFixed(5);
+      document.getElementById('manLon').value = pos.coords.longitude.toFixed(5);
+      btn.textContent = original;
+      showToast('Posizione attuale inserita: scrivi un nome e conferma');
+      document.getElementById('manNome').focus();
+    },
+    (err)=>{
+      btn.textContent = original;
+      let msg = 'Posizione non disponibile';
+      if (err && err.code===1) msg = 'Permesso di localizzazione negato: attivalo nelle impostazioni del sito in Chrome';
+      showToast(msg);
+    },
+    {timeout:8000, enableHighAccuracy:true}
+  );
+});
 
 async function loadPersistedRawData(){
   try{
