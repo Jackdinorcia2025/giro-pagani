@@ -98,6 +98,8 @@ main{padding: 18px 18px 10px;}
 .icon-btn{width:32px; height:32px; border-radius:8px; background:var(--surface-2); border:1px solid var(--line); color:var(--text-muted); display:flex; align-items:center; justify-content:center; cursor:pointer; flex:none;}
 .icon-btn:active{background:var(--line);}
 .nav-btn{flex:1; background:var(--amber); color:#241a0a; border:none; border-radius:8px; height:32px; font-weight:600; font-size:12.5px; display:flex; align-items:center; justify-content:center; gap:6px; cursor:pointer; font-family:'IBM Plex Sans', sans-serif;}
+.save-coords-btn{width:100%; margin-top:8px; background:var(--surface-2); border:1px dashed var(--teal); color:var(--teal); border-radius:8px; height:36px; font-weight:600; font-size:12px; font-family:'IBM Plex Sans', sans-serif; cursor:pointer;}
+.save-coords-btn:active{background:var(--teal-dim);}
 .nav-btn:active{filter:brightness(0.92);}
 .done-toggle{width:32px; height:32px; border-radius:8px; border:1px solid var(--line); background:var(--surface-2); color:var(--good); display:flex; align-items:center; justify-content:center; cursor:pointer; flex:none;}
 .stop.done .done-toggle{background:var(--good); color:#0E1B19; border-color:var(--good);}
@@ -570,6 +572,8 @@ function render(){
     if(downBtn) downBtn.addEventListener('click', ()=>moveStop(i,1));
     const rmBtn = card.querySelector('.rm-btn');
     if(rmBtn) rmBtn.addEventListener('click', ()=>removeStop(i));
+    const saveBtn = card.querySelector('.save-coords-btn');
+    if(saveBtn) saveBtn.addEventListener('click', ()=>saveCoordsHere(s.id));
   });
 }
 
@@ -594,6 +598,10 @@ function stopHtml(s,i){
        <div class="done-toggle" title="Segna come fatto">&#10003;</div>
        ${s.kind!=='visit' ? '<div class="icon-btn rm-btn" title="Rimuovi">&times;</div>' : ''}`;
 
+  const saveCoordsBtn = (!isHome && !s.lat)
+    ? `<button class="save-coords-btn">&#128205; Sei qui adesso? Salva questa posizione</button>`
+    : '';
+
   return `<div class="stop ${s.done?'done':''} ${s.kind!=='visit'?'extra':''} ${isHome?'home':''}" id="stop-${i}">
     <div class="stop-node">${isHome ? '&#8962;' : (i+1)}</div>
     <div class="stop-card">
@@ -605,6 +613,7 @@ function stopHtml(s,i){
       </div>
       <div class="badges">${badges.join('')}</div>
       <div class="stop-actions">${actions}</div>
+      ${saveCoordsBtn}
     </div>
   </div>`;
 }
@@ -628,6 +637,62 @@ async function removeStop(i){
   currentStops.splice(i,1);
   render();
   await persistCurrent();
+}
+
+// Registra la posizione GPS attuale per una tappa che non ha coordinate.
+// Se la tappa corrisponde a un impianto reale (visita pianificata o punto
+// aggiunto dall'anagrafica), la posizione viene salvata anche nella "mappa"
+// (RAW_KMZ): così vale per sempre, anche nei mesi futuri, e non va rifatta.
+// Se invece è un punto puramente manuale, aggiorna solo quella tappa.
+async function saveCoordsHere(stopId){
+  if (!navigator.geolocation){ showToast('Il browser non supporta la geolocalizzazione'); return; }
+  showToast('Rilevamento posizione...');
+  navigator.geolocation.getCurrentPosition(
+    async pos=>{
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
+      if (!isPlausibleCoord(lat, lon)){
+        showToast('Posizione rilevata non plausibile, riprova');
+        return;
+      }
+      const idx = currentStops.findIndex(s=>s.id===stopId);
+      if (idx<0) return;
+      const stop = currentStops[idx];
+      currentStops[idx] = {...stop, lat, lon};
+
+      let sapId = null;
+      if (stop.kind === 'visit' && typeof stop.id === 'string' && stop.id.startsWith('visit:')){
+        sapId = stop.id.slice('visit:'.length);
+      } else if (typeof stop.id === 'string' && stop.id.startsWith('cat:')){
+        sapId = stop.id.slice('cat:'.length);
+      }
+
+      let savedToMap = false;
+      if (sapId){
+        const exIdx = RAW_KMZ.findIndex(p=>p.id===sapId);
+        const newPoint = {id: sapId, lat, lon, nome: stop.nome, tipo: stop.tipo};
+        if (exIdx>=0) RAW_KMZ[exIdx] = newPoint; else RAW_KMZ.push(newPoint);
+        try{
+          await storageAdapter.set('raw_kmz', JSON.stringify(RAW_KMZ), false);
+          rebuildDerived();
+          savedToMap = true;
+        }catch(e){ console.error(e); }
+      }
+
+      render();
+      await persistCurrent();
+      showToast(savedToMap
+        ? `Posizione salvata per "${stop.nome||'questo punto'}" — vale anche per i prossimi mesi`
+        : `Posizione salvata per "${stop.nome||'questo punto'}" (solo per oggi)`);
+    },
+    (err)=>{
+      let msg = 'Posizione non disponibile';
+      if (err && err.code===1) msg = 'Permesso di localizzazione negato: attivalo nelle impostazioni del sito in Chrome';
+      else if (err && err.code===2) msg = 'GPS irraggiungibile al momento';
+      else if (err && err.code===3) msg = 'Richiesta posizione scaduta (timeout)';
+      showToast(msg);
+    },
+    {timeout:8000, enableHighAccuracy:true}
+  );
 }
 
 // ---------- navigation ----------
